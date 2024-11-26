@@ -7,11 +7,11 @@ expense_tracker
         -index.html
         -script.js
 2. Open a new terminal and run the commands:
-    > cd expense_tracker/backend
-    > go clean -modcache
-    > go mod init expense_track
-    > go mod tidy
-    > go run main.go
+    - cd expense_tracker/backend
+    - go clean -modcache
+    - go mod init expense_track
+    - go mod tidy
+    - go run main.go
 
     Allow the app to run and open index.html in the browser. In the terminal, one should see "Server running on http://localhost:8081".
     In the browser, the application opens and the home page is displayed.
