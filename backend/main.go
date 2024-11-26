@@ -3,130 +3,143 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
-	"os"
+	"log"
+	"net/http"
+	"strconv"
+	"strings"
+	"sync"
 	"time"
 )
 
-// Expense represents a single expense entry
+// Expense represents an expense entry
 type Expense struct {
-	Description string    `json:"description"`
-	Category    string    `json:"category"`
-	Amount      float64   `json:"amount"`
-	Date        time.Time `json:"date"`
+	ID       int     `json:"id"`
+	Name     string  `json:"name"`
+	Category string  `json:"category"`
+	Amount   float64 `json:"amount"`
+	Date     string  `json:"date"`
 }
 
-// ExpensesData holds all the expenses
-type ExpensesData struct {
-	Expenses []Expense `json:"expenses"`
-}
+var (
+	expenses  = []Expense{}
+	idCounter = 1
+	mu        sync.Mutex
+)
 
-// LoadExpenses loads expenses from a file
-func LoadExpenses(filename string) (ExpensesData, error) {
-	var data ExpensesData
-
-	file, err := ioutil.ReadFile(filename)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return data, nil // Return empty if file does not exist
-		}
-		return data, err
-	}
-
-	err = json.Unmarshal(file, &data)
-	return data, err
-}
-
-// SaveExpenses saves expenses to a file
-func SaveExpenses(filename string, data ExpensesData) error {
-	file, err := json.MarshalIndent(data, "", "  ")
-	if err != nil {
-		return err
-	}
-	return ioutil.WriteFile(filename, file, 0644)
-}
-
-// AddExpense adds a new expense to the data
-func AddExpense(data *ExpensesData, description, category string, amount float64) {
-	expense := Expense{
-		Description: description,
-		Category:    category,
-		Amount:      amount,
-		Date:        time.Now(),
-	}
-	data.Expenses = append(data.Expenses, expense)
-}
-
-// ViewExpenses prints all expenses with optional filtering by category
-func ViewExpenses(data ExpensesData, category string) {
-	var total float64
-	fmt.Println("\nExpenses:")
-	for _, expense := range data.Expenses {
-		if category == "" || expense.Category == category {
-			fmt.Printf("Description: %s | Category: %s | Amount: %.2f | Date: %s\n",
-				expense.Description, expense.Category, expense.Amount, expense.Date.Format("2006-01-02"))
-			total += expense.Amount
-		}
-	}
-	fmt.Printf("Total Spending: %.2f\n", total)
-}
-
-// Main menu for CLI
 func main() {
-	const filename = "expenses.json"
+	mux := http.NewServeMux()
 
-	data, err := LoadExpenses(filename)
-	if err != nil {
-		fmt.Println("Error loading expenses:", err)
+	// Define routes
+	mux.HandleFunc("/expenses", handleExpenses)
+	mux.HandleFunc("/expenses/", handleDeleteExpense)
+
+	// Enable CORS middleware
+	handlerWithCORS := enableCORS(mux)
+
+	// Start the server
+	fmt.Println("Server running on http://localhost:8081")
+	log.Fatal(http.ListenAndServe(":8081", handlerWithCORS))
+}
+
+// handleExpenses handles GET and POST requests for expenses
+func handleExpenses(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		// Filter by category if query parameter exists
+		category := r.URL.Query().Get("category")
+		if category != "" {
+			filteredExpenses := filterExpensesByCategory(category)
+			writeJSON(w, filteredExpenses)
+			return
+		}
+
+		// Return all expenses
+		writeJSON(w, expenses)
+
+	case http.MethodPost:
+		// Parse the expense from the request body
+		var expense Expense
+		if err := json.NewDecoder(r.Body).Decode(&expense); err != nil {
+			http.Error(w, "Invalid input", http.StatusBadRequest)
+			return
+		}
+
+		// Add a date to the expense (current date in US order)
+		expense.Date = time.Now().Format("2006/02/01")
+
+		// Add the expense to the slice
+		mu.Lock()
+		expense.ID = idCounter
+		idCounter++
+		expenses = append(expenses, expense)
+		mu.Unlock()
+
+		writeJSON(w, map[string]string{"message": "Expense added successfully"})
+	}
+}
+
+// handleDeleteExpense handles DELETE requests to delete an expense
+func handleDeleteExpense(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	for {
-		fmt.Println("\nExpense Tracker Menu:")
-		fmt.Println("1. Add Expense")
-		fmt.Println("2. View All Expenses")
-		fmt.Println("3. View Expenses by Category")
-		fmt.Println("4. Exit")
-		fmt.Print("Enter your choice: ")
+	// Extract the expense ID from the URL
+	idStr := strings.TrimPrefix(r.URL.Path, "/expenses/")
+	id, err := strconv.Atoi(idStr)
+	if err != nil {
+		http.Error(w, "Invalid expense ID", http.StatusBadRequest)
+		return
+	}
 
-		var choice int
-		fmt.Scan(&choice)
-
-		switch choice {
-		case 1:
-			var description, category string
-			var amount float64
-
-			fmt.Print("Enter description: ")
-			fmt.Scan(&description)
-			fmt.Print("Enter category (e.g., food, transportation): ")
-			fmt.Scan(&category)
-			fmt.Print("Enter amount: ")
-			fmt.Scan(&amount)
-
-			AddExpense(&data, description, category, amount)
-			err := SaveExpenses(filename, data)
-			if err != nil {
-				fmt.Println("Error saving expenses:", err)
-			} else {
-				fmt.Println("Expense added successfully.")
-			}
-
-		case 2:
-			ViewExpenses(data, "")
-
-		case 3:
-			var category string
-			fmt.Print("Enter category to filter by: ")
-			fmt.Scan(&category)
-			ViewExpenses(data, category)
-
-		case 4:
-			fmt.Println("Goodbye!")
+	// Delete the expense with the given ID
+	mu.Lock()
+	defer mu.Unlock()
+	for i, expense := range expenses {
+		if expense.ID == id {
+			expenses = append(expenses[:i], expenses[i+1:]...)
+			writeJSON(w, map[string]string{"message": "Expense deleted successfully"})
 			return
-
-		default:
-			fmt.Println("Invalid choice. Please try again.")
 		}
+	}
+
+	http.Error(w, "Expense not found", http.StatusNotFound)
+}
+
+// filterExpensesByCategory filters expenses by category
+func filterExpensesByCategory(category string) []Expense {
+	mu.Lock()
+	defer mu.Unlock()
+	var filtered []Expense
+	for _, expense := range expenses {
+		if strings.EqualFold(expense.Category, category) {
+			filtered = append(filtered, expense)
+		}
+	}
+	return filtered
+}
+
+// enableCORS is a middleware to handle CORS
+func enableCORS(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+// writeJSON writes a JSON response
+func writeJSON(w http.ResponseWriter, data interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(data); err != nil {
+		http.Error(w, "Failed to encode JSON", http.StatusInternalServerError)
 	}
 }
